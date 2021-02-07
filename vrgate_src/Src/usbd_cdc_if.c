@@ -23,6 +23,8 @@
 #include "usbd_cdc_if.h"
 
 /* USER CODE BEGIN INCLUDE */
+#include "utils.h"
+#include "i2cdump_gen.h"
 
 /* USER CODE END INCLUDE */
 
@@ -96,6 +98,8 @@ uint8_t UserTxBufferFS[APP_TX_DATA_SIZE];
 
 /* USER CODE BEGIN PRIVATE_VARIABLES */
 
+uint8_t edid_offset = 0;
+uint8_t upload_edid_mode = 0;
 /* USER CODE END PRIVATE_VARIABLES */
 
 /**
@@ -261,11 +265,89 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
   */
 static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 {
+  char buffer[128];
   /* USER CODE BEGIN 6 */
-  USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
-  USBD_CDC_ReceivePacket(&hUsbDeviceFS);
-  return (USBD_OK);
-  /* USER CODE END 6 */
+	if (upload_edid_mode != 0) {
+		/*uint32_t buffer_index = 0;
+		while (1) {
+			if (buffer_index == *Len) {	// cdc buffer end
+				break;
+			}
+			if (edid_offset == 255) {
+				edidbuf[edid_offset] = Buf[buffer_index];
+				edid_offset = 0;
+				++buffer_index;
+				if (buffer_index < *Len) {	// too many data
+					sprintf(buffer, "WARN: more than 256 bytes!\n");
+					CDC_Transmit_FS((uint8_t*) buffer, strlen(buffer));
+				}
+				upload_edid_mode = 0;
+				// EDID upload finished
+				// calc checksum
+				uint8_t checksum = 0;
+				for (uint8_t i = 0; i < 255; ++i) {
+					checksum += edidbuf[i];
+				}
+				if (checksum != edidbuf[255]) {
+					sprintf(buffer, "ERROR: checksum mismatch!\n");
+					CDC_Transmit_FS((uint8_t*) buffer, strlen(buffer));
+				} else {
+					sprintf(buffer, "new EDID loaded\n");
+					CDC_Transmit_FS((uint8_t*) buffer, strlen(buffer));
+				}
+
+			} else {
+				edidbuf[edid_offset] = Buf[buffer_index];
+				++edid_offset;
+				++buffer_index;
+			}
+		}*/
+	} else {
+
+		uint32_t size = *Len > 127 ? 127 : *Len;
+		memcpy(buffer, Buf, size);
+		buffer[size] = '\0';
+		++size;
+
+		if (buffer[0] == 'C') {
+			sprintf(buffer, "SYS STATUS: %.2x\n", checkSysReg());
+			CDC_Transmit_FS((uint8_t*) buffer, strlen(buffer));
+		} else if (buffer[0] == 0x01) {
+			if (*Len >= 3) {
+				sprintf(buffer, "REG 0x%.2x%.2x: %.2x\n", buffer[1], buffer[2],
+						checkSysRegA(buffer[1] * 256 + buffer[2]));
+				CDC_Transmit_FS((uint8_t*) buffer, strlen(buffer));
+			}
+		} else if (buffer[0] == 'm') {
+			sprintf(buffer, "switch to fast mode\n");
+			CDC_Transmit_FS((uint8_t*) buffer, strlen(buffer));
+			setInitMode(0);
+		} else if (buffer[0] == 'M') {
+			sprintf(buffer, "switch to normal mode\n");
+			CDC_Transmit_FS((uint8_t*) buffer, strlen(buffer));
+			setInitMode(1);
+		} else if (buffer[0] == 'E') {
+			sprintf(buffer, "upload EDID...\n");
+			CDC_Transmit_FS((uint8_t*) buffer, strlen(buffer));
+			upload_edid_mode = 1;
+		} else if (buffer[0] == 'L') {
+			unsigned int pwm_width = 31;
+
+			pwm_width = str2u16(buffer + 1, strlen(buffer + 1));
+			pwm_width = pwm_width > 63 ? 63 : pwm_width;
+			pwm_width = pwm_width < 0 ? 0 : pwm_width;
+			setPWMPulse(pwm_width);
+			updateBcaklight(pwm_width);
+
+			sprintf(buffer, "Backlight=%.2d\n", pwm_width);
+			CDC_Transmit_FS((uint8_t*) buffer, strlen(buffer));
+		}
+	}
+
+	USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
+	USBD_CDC_ReceivePacket(&hUsbDeviceFS);
+	return (USBD_OK);
+	/* USER CODE END 6 */
 }
 
 /**

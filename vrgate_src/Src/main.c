@@ -16,14 +16,22 @@
   *
   ******************************************************************************
   */
+/*
+ * 0x080e0000 u32 sysconfig
+ * 0x080c0000 u32 edidconf
+ * 0x080c0100 u32[64] edid
+ */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "usb_device.h"
+#include "usbd_cdc_if.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "i2cdump_gen.h"
+#include "utils.h"
+#include "stmflash.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -37,7 +45,8 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
+#define __TC358840XBG_I2C_ADDR 0x0f
+#define TC358840XBG_I2C_ADDR ( __TC358840XBG_I2C_ADDR << 1 )
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -51,6 +60,11 @@ UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 
+uint8_t isInited=0;
+volatile uint8_t isConnected=0;
+volatile uint8_t isIniting=0;
+volatile uint8_t pwmVal=31;
+volatile uint8_t sysInitMode=0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -61,12 +75,143 @@ static void MX_SPI2_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
-
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin);
+static void replay_i2c(const i2c_op *ops, const uint16_t size);
+static void i2c_conf_init();
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
+	if(GPIO_Pin==GPIO_PIN_1){
+		if(isIniting==1){
+			char uartbuf[64];
+			sprintf(uartbuf,"WARN: HDMI changed during init\n");
+			CDC_Transmit_FS((uint8_t*)uartbuf,strlen(uartbuf));
+		}
+		/*char uartbuf[64];
+		uint8_t i2cbuf[4]={0x00,0x00,0x00,0x00};
+		//sprintf(uartbuf,"INT detected\n");
+		i2cbuf[0]=0x85;
+		i2cbuf[1]=0x0b;
+		i2cbuf[2]=0xff;
+		HAL_I2C_Master_Transmit(&hi2c2,TC358840XBG_I2C_ADDR,i2cbuf,3,10);
+		i2cbuf[0]=0x00;
+		i2cbuf[1]=0x14;
+		i2cbuf[2]=0xbf;
+		i2cbuf[3]=0x0f;
+		HAL_I2C_Master_Transmit(&hi2c2,TC358840XBG_I2C_ADDR,i2cbuf,4,10);
+		//CDC_Transmit_FS((uint8_t*)uartbuf,strlen(uartbuf));
+		if(isInited){
+			i2cbuf[0]=checkSysReg();
+			sprintf(uartbuf,"SYS STATUS: %.2x\n",i2cbuf[0]);
+			CDC_Transmit_FS((uint8_t*)uartbuf,strlen(uartbuf));
+			if(!((i2cbuf[0] & 0x0f) ==0x0f)){	// disconnected, init
+				setPWMPulse(63);
+				isConnected=0;
+				//replay_i2c(i2cops_init,sizeof(i2cops_init)/sizeof(i2c_op));
+				sprintf(uartbuf,"HDMI Disconnected\n");
+				CDC_Transmit_FS((uint8_t*)uartbuf,strlen(uartbuf));
+			}else{
+				isConnected=1;
+				setPWMPulse(pwmVal);
+				sprintf(uartbuf,"HDMI Connected\n");
+				CDC_Transmit_FS((uint8_t*)uartbuf,strlen(uartbuf));
+			}
+		}*/
+	}
+}
 
+void replay_i2c(const i2c_op *ops, const uint16_t size){
+
+	HAL_Delay(10);
+	for(uint16_t i=0;i<size;++i){
+		HAL_Delay(ops[i].timestamp);
+		uint8_t i2cbuf[6];
+		if(ops[i].operate==0){	// Write
+			i2cbuf[0]=ops[i].address / 256;
+			i2cbuf[1]=ops[i].address % 256;
+			if(ops[i].datasize==2){
+				i2cbuf[2]=ops[i].data / 256;
+				i2cbuf[3]=ops[i].data % 256;
+			}else if(ops[i].datasize==1){
+				i2cbuf[2]=ops[i].data % 256;
+			}else if(ops[i].datasize==4){
+				i2cbuf[2]= ops[i].data/(256*256*256);
+				i2cbuf[3]= (ops[i].data % (256*256*256))/(256*256);
+				i2cbuf[4]= (ops[i].data % (256*256))/(256);
+				i2cbuf[5]= (ops[i].data % (256));
+			}
+			HAL_I2C_Master_Transmit(&hi2c2,TC358840XBG_I2C_ADDR,i2cbuf,ops[i].datasize+2,10);
+		}else{	// Read
+			i2cbuf[0]=ops[i].address / 256;
+			i2cbuf[1]=ops[i].address % 256;
+			HAL_I2C_Master_Transmit(&hi2c2,TC358840XBG_I2C_ADDR,i2cbuf,2,10);
+			HAL_I2C_Master_Receive(&hi2c2,TC358840XBG_I2C_ADDR,i2cbuf,ops[i].datasize,10);
+		}
+	}
+}
+void i2c_conf_init(){
+	HAL_NVIC_DisableIRQ(EXTI1_IRQn);
+	isIniting=1;
+	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
+	replay_i2c(i2cops_init_be,sizeof(i2cops_init_be)/sizeof(i2c_op));
+	if(STMFLASH_ReadWord(0x080e0000)==0xabcdefab){	// user defined EDID
+
+	}else{	// preset EDID
+		uint8_t i2cbuf[3]={0x8c,0x00,0x00};
+		for(uint16_t i=0;i<256;++i){
+			i2cbuf[1]=i;
+			i2cbuf[2]=i2cops_init_edid[i];
+			HAL_I2C_Master_Transmit(&hi2c2,TC358840XBG_I2C_ADDR,i2cbuf,3,10);
+		}
+	}
+	replay_i2c(i2cops_init_ae,sizeof(i2cops_init_ae)/sizeof(i2c_op));
+	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+	isIniting=0;
+	HAL_NVIC_EnableIRQ(EXTI1_IRQn);
+}
+void setPWMPulse(uint16_t pulseWidth){
+	/*TIM_OC_InitTypeDef sConfigOC = {0};
+	sConfigOC.OCMode = TIM_OCMODE_PWM1;
+	sConfigOC.Pulse = pulseWidth;
+	sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+	sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+	HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1);*/
+	TIM3->CCR1=pulseWidth;
+}
+void updateBcaklight(uint16_t val){
+	pwmVal=val;
+	u32tou8 flashdata;
+	flashdata.u8[0]=0xab;
+	flashdata.u8[1]=pwmVal;
+	flashdata.u8[2]=sysInitMode;
+	STMFLASH_Write(0x080e0000,&flashdata.u32,1);
+}
+void setInitMode(uint8_t mode){
+	sysInitMode=mode;
+	u32tou8 flashdata;
+	flashdata.u8[0]=0xab;
+	flashdata.u8[1]=pwmVal;
+	flashdata.u8[2]=sysInitMode;
+	STMFLASH_Write(0x080e0000,&flashdata.u32,1);
+}
+uint8_t checkSysReg(){
+	uint8_t i2cbuf[2]={0x00,0x00};
+	i2cbuf[0]=0x85;
+	i2cbuf[1]=0x20;
+	HAL_I2C_Master_Transmit(&hi2c2,TC358840XBG_I2C_ADDR,i2cbuf,2,10);
+	HAL_I2C_Master_Receive(&hi2c2,TC358840XBG_I2C_ADDR,i2cbuf,1,10);
+	return i2cbuf[0];
+}
+uint8_t checkSysRegA(uint16_t addr){
+	uint8_t i2cbuf[2]={0x00,0x00};
+	i2cbuf[0]=addr/256;
+	i2cbuf[1]=addr%256;
+	HAL_I2C_Master_Transmit(&hi2c2,TC358840XBG_I2C_ADDR,i2cbuf,2,10);
+	HAL_I2C_Master_Receive(&hi2c2,TC358840XBG_I2C_ADDR,i2cbuf,1,10);
+	return i2cbuf[0];
+}
 /* USER CODE END 0 */
 
 /**
@@ -102,7 +247,55 @@ int main(void)
   MX_SPI2_Init();
   MX_USART2_UART_Init();
   MX_TIM3_Init();
+
+  u32tou8 flashdata;
+  flashdata.u32= STMFLASH_ReadWord(0x080e0000);
+  if(flashdata.u8[0]==0xab){
+	  pwmVal=flashdata.u8[1];
+	  sysInitMode=flashdata.u8[2];
+  }else{
+	  flashdata.u8[0]=0xab;
+	  flashdata.u8[1]=31;
+	  flashdata.u8[2]=0x00;
+	  STMFLASH_Write(0x080e0000,&flashdata.u32,1);
+  }
+
   /* USER CODE BEGIN 2 */
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);	// Backlight PWM
+  TIM3->CCR1=63;
+
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_SET);	// RESETN=0 for 10ms, TOSHIBA
+  HAL_Delay(10);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_RESET);	// RESETN=1
+
+  HAL_Delay(500);
+
+  /* dump TOSHIBA Chip and Revision ID */
+  uint8_t i2cbuf[4]={0x00,0x00,0x00,0x00};
+  char uartbuf[64];
+  if(HAL_I2C_Master_Transmit(&hi2c2,TC358840XBG_I2C_ADDR,i2cbuf,2,10)!=HAL_OK){
+	  sprintf(uartbuf,"I2C write to TC358840XBG failed\n");
+  }else{
+	  if(HAL_I2C_Master_Receive(&hi2c2,TC358840XBG_I2C_ADDR,i2cbuf,2,10)!=HAL_OK){
+		  sprintf(uartbuf,"I2C read from TC358840XBG failed\n");
+	  }else{
+		  sprintf(uartbuf,"TC358840XBG ChipID=0x%.2x, RevisionID=0x%.2x\n",i2cbuf[1],i2cbuf[0]);
+	  }
+  }
+  CDC_Transmit_FS((uint8_t*)uartbuf,strlen(uartbuf));
+
+  // configure TOSHIBA
+  i2c_conf_init();
+  isInited=1;
+  uint8_t sysreg=checkSysReg();
+  sprintf(uartbuf,"SYS STATUS: %.2x\n",sysreg);
+  CDC_Transmit_FS((uint8_t*)uartbuf,strlen(uartbuf));
+  if((sysreg& 0x0f)==0x0f){	// Detected on boot?
+	  isConnected=1;
+  }else{
+	  isConnected=0;
+  }
+  HAL_Delay(50);
 
   /* USER CODE END 2 */
 
@@ -111,7 +304,39 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
-
+	sysreg=checkSysReg();
+	/*sprintf(uartbuf,"SYS STATUS L: %.2x\n",sysreg);
+	CDC_Transmit_FS((uint8_t*)uartbuf,strlen(uartbuf));*/
+	if((sysreg& 0x0f)==0x0f){	// detected
+		if(!isConnected){	// first detected, hdmi ready
+			if(sysInitMode==1){
+				HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_SET);	// RESETN=0 for 10ms, TOSHIBA
+				HAL_Delay(10);
+				HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_RESET);	// RESETN=1
+				HAL_Delay(500);
+				i2c_conf_init();
+			}
+			setPWMPulse(pwmVal);	// recover
+			HAL_Delay(3000);
+			isConnected=1;
+		}
+	}else{	// lost
+		if(isConnected){	// first lost
+			setPWMPulse(63);	// backlight off
+			if(sysInitMode==0){
+				HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_SET);	// RESETN=0 for 10ms, TOSHIBA
+				HAL_Delay(10);
+				HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_RESET);	// RESETN=1
+				HAL_Delay(500);
+				i2c_conf_init();
+			}
+			isConnected=0;
+		}
+	}
+	HAL_Delay(200);
+	/*sprintf(uartbuf,"Heartbeat\n");
+	CDC_Transmit_FS((uint8_t*)uartbuf,strlen(uartbuf));
+	HAL_Delay(1000);*/
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
@@ -277,7 +502,7 @@ static void MX_TIM3_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 31;
+  sConfigOC.Pulse = 63;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)

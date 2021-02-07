@@ -43,6 +43,9 @@ Src/usbd_desc.c \
 Src/usbd_cdc_if.c \
 Src/stm32f4xx_it.c \
 Src/stm32f4xx_hal_msp.c \
+Src/stmflash.c \
+Src/utils.c \
+Src/delay.c \
 Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pcd.c \
 Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pcd_ex.c \
 Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_usb.c \
